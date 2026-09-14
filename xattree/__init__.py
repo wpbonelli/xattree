@@ -769,6 +769,69 @@ def get_xatspec(cls: type) -> XatSpec:
     return _get_xatspec(cls)
 
 
+def _default_child_name(cls: type) -> str:
+    """
+    The name a child's tree node gets when no explicit `name=` is passed
+    at construction (see `_XTRA_ATTRS[_NAME]`'s default).
+    """
+    return cls.__name__.lower()
+
+
+def _is_explicit_child_name(child: Any, where: str) -> bool:
+    """
+    Whether a child's current name was explicitly given, rather than left
+    at its class' default.
+    """
+    return getattr(child, where).name != _default_child_name(type(child))
+
+
+def _resolve_child_name(
+    used: Iterable[str],
+    kind: ChildKind,
+    field_name: str,
+    child: Any,
+    where: str = _DATA,
+    key: Optional[str] = None,
+) -> str:
+    """
+    Resolve the name a child should be attached under on a parent field,
+    given the set of names already claimed by *any* of the parent's
+    children (`used`).
+
+    `list` and `dict` kinds raise immediately on a name collision here.
+    `only`-kind does not raise here: attaching under an already-claimed
+    key is sometimes a legitimate same-field replace (e.g. overwriting a
+    default-factory-created singleton), which only the caller can tell
+    apart from a genuine cross-field collision
+    """
+    match kind:
+        case "dict":
+            name = key if key is not None else getattr(child, where).name
+            if name in used:
+                raise ValueError(
+                    f"Child name '{name}' collides with an existing child on the same parent."
+                )
+            return name
+        case "only":
+            if _is_explicit_child_name(child, where):
+                return getattr(child, where).name
+            return field_name
+        case "list":
+            if _is_explicit_child_name(child, where):
+                name = getattr(child, where).name
+                if name in used:
+                    raise ValueError(
+                        f"Child name '{name}' collides with an existing child on the same parent."
+                    )
+                return name
+            i = 0
+            while f"{field_name}{i}" in used:
+                i += 1
+            return f"{field_name}{i}"
+        case _:
+            raise TypeError(f"Bad child collection kind '{kind}'")
+
+
 def _bind_tree(
     self: Any,
     parent: Any = None,
@@ -829,16 +892,27 @@ def _bind_tree(
         def _update_or_assign(field: Child, name: str) -> tuple[str, bool, dict]:
             match field.kind:
                 case "only":
-                    if name in parent.data:
-                        return name, True, {name: tree}
-                    else:
-                        return name, False, {name: tree, **siblings}
+                    key = _resolve_child_name(siblings.keys(), "only", parent_field, self, where)
+                    if key in siblings:
+                        # a name collision is only a legitimate replace if the
+                        # existing occupant belongs to this same field (e.g. a
+                        # default-factory-created singleton); otherwise it's a
+                        # genuine collision with some other field's child
+                        if not _matches_type(siblings[key].attrs[_HOST], field.type):
+                            raise ValueError(
+                                f"Child name '{key}' collides with an existing "
+                                "child on the same parent."
+                            )
+                        return key, True, {key: tree}
+                    return key, False, {key: tree, **siblings}
                 case "list":
-                    same_type = {n: c for n, c in siblings.items() if type(c.attrs[_HOST]) is cls}
-                    name = f"{name}{len(same_type)}"
-                    return name, name in parent.data, siblings | {name: tree}
+                    key = _resolve_child_name(siblings.keys(), "list", parent_field, self, where)
+                    return key, False, siblings | {key: tree}
                 case "dict":
-                    return name, name in parent.data, siblings | {name: tree}
+                    key = _resolve_child_name(
+                        siblings.keys(), "dict", parent_field, self, where, key=name
+                    )
+                    return key, False, siblings | {key: tree}
 
         name, update, new_siblings = _update_or_assign(field, name)
         if update:
@@ -913,6 +987,7 @@ def _init_tree(
     xatspec = _get_xatspec(cls)
 
     def _yield_children() -> Iterator[tuple[str, Any]]:
+        used: set[str] = set()
         for child in self.__dict__.pop(_CHILDREN, {}).values():
             yield child
         for xat in xatspec.children.values():
@@ -926,7 +1001,14 @@ def _init_tree(
                             f"Cannot initialize field '{xat.name}' with {type(child).__name__} "
                             f"(expected {xat.type})"
                         )
-                    yield (xat.name, child)
+                    name = _resolve_child_name(used, "only", xat.name, child, where)
+                    if name in used:
+                        raise ValueError(
+                            f"Child name '{name}' collides with an existing child "
+                            "on the same parent."
+                        )
+                    used.add(name)
+                    yield (name, child)
                 case "list":
                     # Strict type checking for list items
                     for i, c in enumerate(child):
@@ -936,7 +1018,9 @@ def _init_tree(
                                 f"with {type(c).__name__} at index {i} "
                                 f"(expected {xat.type})"
                             )
-                        yield (f"{xat.name}{i}", c)
+                        name = _resolve_child_name(used, "list", xat.name, c, where)
+                        used.add(name)
+                        yield (name, c)
                 case "dict":
                     # Strict type checking for dict values
                     for k, c in child.items():
@@ -946,7 +1030,9 @@ def _init_tree(
                                 f"with {type(c).__name__} at key '{k}' "
                                 f"(expected {xat.type})"
                             )
-                        yield (k, c)
+                        name = _resolve_child_name(used, "dict", xat.name, c, where, key=k)
+                        used.add(name)
+                        yield (name, c)
                 case _:
                     raise TypeError(f"Bad child collection field '{xat.name}'")
 
@@ -1220,9 +1306,25 @@ def _getattr(self: Any, name: str) -> Any:
                     case "list":
                         return DataTreeList(tree, type_=xat.type, where=where, prefix=xat.name)  # type: ignore
                     case "only":
-                        if (child := tree.children.get(xat.name, None)) is not None:
-                            return child.attrs[_HOST]
-                        return None
+                        # a type-filtered scan, not an exact lookup by field
+                        # name, since a child's key isn't guaranteed to equal
+                        # its field name any more (it may carry an explicit
+                        # name instead)
+                        matches = [
+                            c.attrs[_HOST]
+                            for c in tree.children.values()
+                            if _matches_type(c.attrs[_HOST], xat.type)
+                        ]
+                        match len(matches):
+                            case 0:
+                                return None
+                            case 1:
+                                return matches[0]
+                            case _:
+                                raise TypeError(
+                                    f"Multiple children match field '{name}' "
+                                    f"(expected {xat.type}); can't resolve unambiguously."
+                                )
             case _:
                 raise TypeError(
                     f"Field '{name}' is not a dimension, coordinate, "
@@ -1708,7 +1810,14 @@ def xattree(
                                             f"(expected {xat.type})"
                                         )
                                 tree = drop_matching_children(tree)
-                                new_nodes = {k: getattr(v, where) for k, v in value.items()}
+                                used = set(tree.children.keys())
+                                new_nodes = {}
+                                for k, v in value.items():
+                                    key = _resolve_child_name(
+                                        used, "dict", xat.name, v, where, key=k
+                                    )
+                                    used.add(key)
+                                    new_nodes[key] = getattr(v, where)
                             case "list":
                                 # Validate each list item
                                 for i, v in enumerate(value):
@@ -1719,9 +1828,12 @@ def xattree(
                                             f"(expected {xat.type})"
                                         )
                                 tree = drop_matching_children(tree)
-                                new_nodes = {
-                                    f"{xat.name}{i}": getattr(v, where) for i, v in enumerate(value)
-                                }
+                                used = set(tree.children.keys())
+                                new_nodes = {}
+                                for v in value:
+                                    key = _resolve_child_name(used, "list", xat.name, v, where)
+                                    used.add(key)
+                                    new_nodes[key] = getattr(v, where)
                             case _:
                                 # Validate single child
                                 if not _matches_type(value, xat.type):
@@ -1729,7 +1841,15 @@ def xattree(
                                         f"Cannot assign {type(value).__name__} to field '{name}' "
                                         f"(expected {xat.type})"
                                     )
-                                new_nodes = {xat.name: getattr(value, where)}
+                                tree = drop_matching_children(tree)
+                                used = set(tree.children.keys())
+                                key = _resolve_child_name(used, "only", xat.name, value, where)
+                                if key in used:
+                                    raise ValueError(
+                                        f"Child name '{key}' collides with an existing "
+                                        "child on the same parent."
+                                    )
+                                new_nodes = {key: getattr(value, where)}
 
                         new_hosts = {k: v.attrs[_HOST] for k, v in new_nodes.items()}
                         old_nodes = dict(tree.children)
