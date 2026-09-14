@@ -11,7 +11,7 @@ class Child:
 
 
 # An explicit name should stick, through every attachment path, for both
-# `only`- and `list`-kind fields. (`dict`-kind already honors given name
+# `only`- and `list`-kind fields. `dict`-kind already honors given names
 
 
 def test_only_kind_explicit_name_sticks_kwarg_attach():
