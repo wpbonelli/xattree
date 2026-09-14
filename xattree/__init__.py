@@ -780,9 +780,7 @@ def _default_child_name(cls: type) -> str:
 def _is_explicit_child_name(child: Any, where: str) -> bool:
     """
     Whether a child's current name was explicitly given, rather than left
-    at its class' default. There's no separate flag tracking this -- an
-    explicitly-given name identical to the default is indistinguishable
-    from an unnamed child, which mirrors how the default itself is wired.
+    at its class' default.
     """
     return getattr(child, where).name != _default_child_name(type(child))
 
@@ -796,26 +794,15 @@ def _resolve_child_name(
     key: Optional[str] = None,
 ) -> str:
     """
-    Resolve the key a child should be attached under on a parent field,
-    given `used` -- the set of names already claimed by *any* of the
-    parent's children, not just siblings from the same field, since
-    `tree.children` is one flat mapping per node. Shared by both
-    attachment paths (`_yield_children`/`_init_tree`'s constructor-kwarg/
-    attribute-assignment path, and `_bind_tree`'s `parent=` path) so they
-    can't drift out of sync with each other the way they used to.
+    Resolve the name a child should be attached under on a parent field,
+    given the set of names already claimed by *any* of the parent's
+    children (`used`).
 
     `list` and `dict` kinds raise immediately on a name collision here.
-    An unnamed `list` child's auto-generated name never collides in the
-    first place -- the smallest unused positional suffix is picked, so it
-    can't collide by construction, rather than being generated and then
-    rejected.
-
     `only`-kind does not raise here: attaching under an already-claimed
     key is sometimes a legitimate same-field replace (e.g. overwriting a
     default-factory-created singleton), which only the caller can tell
-    apart from a genuine cross-field collision -- so `only`-kind just
-    resolves the candidate key (field name, or the explicit name if one
-    was given) and leaves the `used` check to the caller.
+    apart from a genuine cross-field collision
     """
     match kind:
         case "dict":

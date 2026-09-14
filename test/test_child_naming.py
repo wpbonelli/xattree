@@ -1,15 +1,3 @@
-"""
-Tests for the child-naming consolidation: a caller-given `name=` persists
-as the real attachment key (and therefore `.name`) for all three child
-kinds (`only`, `list`, `dict`), through every attachment path (a
-constructor kwarg, `parent=`, or plain attribute assignment). Collisions
-are checked across a parent's *whole* child namespace (not just siblings
-from the same field): an explicit-name collision raises, while an
-auto-generated (unnamed) name never collides in the first place -- it
-picks the next free slot instead. Unnamed default naming is
-field-name-based for every attachment path.
-"""
-
 from typing import Optional
 
 import pytest
@@ -22,11 +10,8 @@ class Child:
     pass
 
 
-# ---------------------------------------------------------------------------
 # An explicit name should stick, through every attachment path, for both
-# `only`- and `list`-kind fields. (`dict`-kind already honors the given
-# name -- that's the pattern this plan generalizes.)
-# ---------------------------------------------------------------------------
+# `only`- and `list`-kind fields. (`dict`-kind already honors given name
 
 
 def test_only_kind_explicit_name_sticks_kwarg_attach():
@@ -74,12 +59,6 @@ def test_list_kind_explicit_name_sticks_parent_attach():
     assert child.name == "custom"
 
 
-# ---------------------------------------------------------------------------
-# `only`-kind lookup must be able to find a child attached under its own
-# explicit name, not just under the field name.
-# ---------------------------------------------------------------------------
-
-
 def test_only_kind_getattr_finds_explicitly_named_child_via_parent_attach():
     @xattree
     class Parent:
@@ -88,15 +67,6 @@ def test_only_kind_getattr_finds_explicitly_named_child_via_parent_attach():
     parent = Parent()
     child = Child(name="custom", parent=parent)
     assert parent.child is child
-
-
-# ---------------------------------------------------------------------------
-# Unnamed default naming is field-name-based for both attachment paths.
-# Path 2 (parent=-attach) used to default to the bare class name instead,
-# ignoring the field name entirely -- a divergence from path 1 flagged in
-# the plan's current-state notes, removed by consolidating onto one
-# shared helper (decision 4).
-# ---------------------------------------------------------------------------
 
 
 def test_only_kind_unnamed_default_kwarg_attach():
@@ -142,12 +112,6 @@ def test_list_kind_unnamed_default_parent_attach():
     assert b.name == "kids1"
 
 
-# ---------------------------------------------------------------------------
-# Collisions must raise immediately, not silently overwrite -- across a
-# parent's whole child namespace, not just within one field.
-# ---------------------------------------------------------------------------
-
-
 def test_dict_kind_cross_field_explicit_name_collision_raises():
     @xattree
     class Parent:
@@ -179,13 +143,6 @@ def test_only_kind_cross_field_explicit_name_collision_raises():
 
 
 def test_auto_generated_name_does_not_collide_with_explicit_name_cross_field():
-    """
-    An auto-generated (unnamed) name must never collide with an explicit
-    name from a *different* field -- not by raising, but by construction:
-    it should pick the next free slot instead, per decision 3 ("an
-    auto-generated name never collides ... by construction").
-    """
-
     @xattree
     class ChildA:
         pass
